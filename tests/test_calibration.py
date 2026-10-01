@@ -132,13 +132,13 @@ def test_first_arm_defines_the_split_and_later_arms_reuse_it(tmp_path, monkeypat
             (Path(cmd[-1]) / "metrics.json").write_text("{}")
 
     monkeypatch.setattr(mod, "_run", fake_run)
-    mod.run_unit("fold0", [], ["pnocov", "faunaformer"], [], study, dry=False)
+    mod.run_unit("fold0", [], ["pnocov", "faunaformer"], [], study, "boar", dry=False)
     train_calls = [c for c in calls if c[2] == "movement.cli.train"]
     assert "--split-file" not in train_calls[0]  # first arm builds the split
     i = train_calls[1].index("--split-file")
     assert "pnocov" in train_calls[1][i + 1]  # second arm reuses it
     # A later invocation with a new arm reuses the existing split too.
     calls.clear()
-    mod.run_unit("fold0", [], ["pcov_idx"], [], study, dry=False)
+    mod.run_unit("fold0", [], ["pcov_idx"], [], study, "boar", dry=False)
     c = [c for c in calls if c[2] == "movement.cli.train"][0]
     assert "--split-file" in c and "/fold0/" in c[c.index("--split-file") + 1].replace("\\", "/")

@@ -54,6 +54,12 @@ modes instead of averaging them in silently:
 - **still improving** — best validation epoch in the last 10% of ``max_epochs``
   without early stopping: undertrained; its number is an upper bound.
 
+Notifications (optional): set ``NTFY_NOTIFICATION_TOPIC`` in ``.env`` to a topic
+name and the study reports to ``https://ntfy.sh/<topic>`` — on start, after each
+experiment (with its ADE/FDE, flagged when the run collapsed), on failure, and
+when the report is rebuilt. Self-host with ``NTFY_NOTIFICATION_URL`` and protect
+the topic with ``NTFY_NOTIFICATION_TOKEN``. Unset topic = no notifications.
+
 Usage (on the GPU machine):
     uv run python scripts/run_covariate_study.py --dataset boar_reshaped
     uv run python scripts/run_covariate_study.py --dataset boar_reshaped --arms cov,nocov,transformer,tcn,lstm
@@ -79,6 +85,7 @@ import yaml
 from movement.data.sampling import MIN_DT_HOURS, detect_sampling, scale_windowing
 from movement.data.transforms import WINDOW_REPRESENTATION
 from movement.utils.env import load_env, raw_dataset_path
+from movement.utils.notify import notify
 
 logger = logging.getLogger("covariate_study")
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -239,8 +246,31 @@ def _run(cmd: list[str], dry: bool) -> None:
         subprocess.run(cmd, check=True, cwd=REPO_ROOT)
 
 
+def _metrics_line(run: Path) -> tuple[str, bool]:
+    """One-line summary of a finished run, and whether it collapsed.
+
+    Mirrors the report's collapse rule: a point arm whose ADE is at least
+    ``COLLAPSE_RATIO`` of constant-position learned nothing. Never raises —
+    a notification is best-effort and must not fail an otherwise good run.
+    """
+    try:
+        m = json.loads((run / "metrics.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "metrics unavailable", False
+    ade, ade_cp = m.get("ade"), m.get("ade_cp")
+    bits = [f"ADE {ade:.1f} m" if ade is not None else None,
+            f"FDE {m['fde']:.1f} m" if m.get("fde") is not None else None]
+    ratio = ade / ade_cp if ade is not None and ade_cp else None
+    if ratio is not None:
+        bits.append(f"{ratio:.3f}× const-pos")
+    if m.get("probabilistic") and m.get("es") is not None:
+        bits.append(f"ES {m['es']:.1f} m")
+    collapsed = ratio is not None and ratio >= COLLAPSE_RATIO and not m.get("probabilistic", False)
+    return " | ".join(b for b in bits if b) or "metrics unavailable", collapsed
+
+
 def run_unit(label: str, unit_overrides: list[str], arms: list[str], common: list[str],
-             study_dir: Path, dry: bool) -> None:
+             study_dir: Path, dataset: str, dry: bool) -> None:
     unit_dir = study_dir / label
     split_file = existing_split(unit_dir)
     for arm in arms:
@@ -261,6 +291,11 @@ def run_unit(label: str, unit_overrides: list[str], arms: list[str], common: lis
                 if done is None:
                     raise RuntimeError(f"No finished run under {arm_dir}")
                 _run([sys.executable, "-m", "movement.cli.eval", "--run", str(done)], dry)
+                summary, collapsed = _metrics_line(done)
+                notify(f"{dataset}: {label}/{arm} done",
+                       f"{summary}\n{study_dir.name}/{label}/{arm}",
+                       tags=["warning"] if collapsed else ["white_check_mark"],
+                       priority="high" if collapsed else "default")
         # The first arm trained in a unit writes the split every later arm reuses.
         if split_file is None and done is not None and (done / "split.json").exists():
             split_file = done / "split.json"
@@ -651,18 +686,24 @@ def write_report(dataset: str, study_dir: Path, tag: str, unit_prefix: str) -> P
     return out
 
 
-def reeval(study_dir: Path, unit_prefix: str, spec: str, dry: bool) -> None:
-    """Re-evaluate existing runs (latest per unit and arm) with the current eval code."""
+def reeval(study_dir: Path, unit_prefix: str, spec: str, dry: bool) -> int:
+    """Re-evaluate existing runs (latest per unit and arm) with the current eval code.
+
+    Returns the number of runs re-evaluated.
+    """
     wanted = sorted(PROBABILISTIC_ARMS) if spec.strip() == "prob" else [a.strip() for a in spec.split(",") if a.strip()]
     unknown = set(wanted) - set(ARMS)
     if unknown:
         raise SystemExit(f"Unknown arm(s) {sorted(unknown)}; choose from {sorted(ARMS)} or 'prob'")
+    n = 0
     for unit_dir in sorted(study_dir.glob(f"{unit_prefix}*"), key=lambda p: _unit_key(p.name)):
         for arm in wanted:
             run = _latest_run(unit_dir / arm)
             if run is None:
                 continue
             _run([sys.executable, "-m", "movement.cli.eval", "--run", str(run)], dry)
+            n += 1
+    return n
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -672,7 +713,10 @@ def main(argv: list[str] | None = None) -> None:
     study_dir, tag, units = study_layout(args)
     unit_prefix = "fold" if args.mode == "kfold" else "split"
     if args.reeval:
-        reeval(study_dir, unit_prefix, args.reeval, args.dry_run)
+        n = reeval(study_dir, unit_prefix, args.reeval, args.dry_run)
+        if not args.dry_run:
+            notify(f"{args.dataset}: re-evaluation done",
+                   f"Re-evaluated {n} run(s) in {study_dir.name}", tags=["white_check_mark"])
     elif not args.report_only:
         arms = [a.strip() for a in args.arms.split(",") if a.strip()]
         unknown = set(arms) - set(ARMS)
@@ -687,10 +731,25 @@ def main(argv: list[str] | None = None) -> None:
             f"trainer.early_stopping_patience={args.patience}",
             *args.override,
         ]
-        for label, unit_overrides in units:
-            run_unit(label, unit_overrides, arms, common, study_dir, args.dry_run)
+        if not args.dry_run:
+            notify(f"{args.dataset}: study started",
+                   f"{tag} | {len(units)} units × {len(arms)} arms\n{study_dir}",
+                   tags=["rocket"], priority="low")
+        label = None
+        try:
+            for label, unit_overrides in units:
+                run_unit(label, unit_overrides, arms, common, study_dir, args.dataset, args.dry_run)
+        except Exception as exc:  # noqa: BLE001 - report the unit that failed, then stop
+            if not args.dry_run:
+                notify(f"{args.dataset}: study failed",
+                       f"{label or 'setup'}: {type(exc).__name__}: {exc}",
+                       tags=["rotating_light"], priority="urgent")
+            raise
     if not args.dry_run:
-        logger.info("Report: %s", write_report(args.dataset, study_dir, tag, unit_prefix))
+        report = write_report(args.dataset, study_dir, tag, unit_prefix)
+        logger.info("Report: %s", report)
+        notify(f"{args.dataset}: report ready",
+               f"{report.relative_to(REPO_ROOT)}", tags=["checkered_flag"])
 
 
 if __name__ == "__main__":
