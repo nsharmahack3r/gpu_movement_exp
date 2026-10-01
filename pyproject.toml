@@ -1,0 +1,66 @@
+[project]
+name = "gpu-movement-exp"
+version = "0.1.0"
+description = "SOTA CNN/LSTM/Transformer trajectory forecasting comparison"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.4",
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "pyproj>=3.6",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+    "tensorboard>=2.17",
+    "pydantic>=2.7",
+    "scikit-learn>=1.5",
+    "matplotlib>=3.8",
+    # Covariate export (scripts/gee_export.py): Parquet is the output format for
+    # both the dedup key tables and the joined per-fix covariate tables.
+    "pyarrow>=17.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/movement"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[project.optional-dependencies]
+wandb = ["wandb>=0.17"]
+# Earth Engine submission + GCS read-back for the covariate export tool. Kept
+# optional so `plan`, `dedup` and the test suite run offline with no EE install.
+gee = ["earthengine-api>=1.0", "google-cloud-storage>=2.16"]
+
+[project.scripts]
+train = "movement.cli.train:main"
+eval = "movement.cli.eval:main"
+
+[tool.uv]
+# CUDA build of PyTorch for the RTX 4060 (Ada, compute 8.9).
+# The CUDA index is prioritized; PyPI is the fallback for packages not
+# published to the PyTorch index (e.g. pyproj).
+index-url = "https://download.pytorch.org/whl/cu124"
+extra-index-url = ["https://pypi.org/simple"]
+index-strategy = "unsafe-first-match"
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+torchaudio = { index = "pytorch-cu124" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

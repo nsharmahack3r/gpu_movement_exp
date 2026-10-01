@@ -1,0 +1,9 @@
+# CNN (TCN) arm overrides. Only the model section differs from base.
+model:
+  name: "tcn"
+  channels: [64, 64, 64, 64]
+  kernel_size: 3
+  dropout: 0.2
+  activation: "gelu"
+  norm: "layernorm"
+  head: "direct"

@@ -1,0 +1,64 @@
+# FaunaFormer (src/movement/models/cov_transformer.py::FaunaFormer).
+#
+# Probabilistic movement forecaster that combines GPS movement with the six
+# Sentinel-2 spectral indices, fused *late* (decoder cross-attention behind a
+# near-closed learnable gate) and fed as *changes* along the track (value minus
+# the window mean, and change since the previous fix) instead of raw levels.
+#
+# Backbone and optimiser are identical to cov_transformer, so FaunaFormer is
+# directly comparable with the study arms pnocov (no covariates) and pcov_idx
+# (the same six indices, early-fused as levels).
+data:
+  split_unit: individual
+
+transforms:
+  time_context: true
+
+covariates:
+  enabled: true
+  path: ${GEE_DATASET_PATH}
+  sources: [sentinel2]
+  file_pattern: "{stem}_{source}.csv"
+  # NDVI, EVI, SAVI (greenness), NDWI, NDMI (water / moisture), NBR (disturbance),
+  # at the fix only: no raw bands, 30 m buffers, snow, green-up rate, scene
+  # count or composite age.
+  include: ["^s2_(ndvi|evi|savi|ndwi|ndmi|nbr)$"]
+  exclude: []
+  date_columns: [s2_composite_date]
+  clip: 8.0
+  min_coverage: 0.5
+  # Hide covariates of fixes < embargo_days before the forecast origin (0 = off).
+  embargo_days: 0
+
+model:
+  name: "faunaformer"
+  d_model: 128
+  nhead: 8
+  num_encoder_layers: 4
+  num_decoder_layers: 1
+  dim_feedforward: 512
+  dropout: 0.1
+  use_covariates: true
+  var_embed_dim: 16
+  covariate_dropout: 0.3
+  context_dropout: 0.2
+  min_context: 4
+  probabilistic: true
+  noise_dim: 16
+  n_samples_train: 16
+  n_samples_eval: 64
+  covariate_fusion: late
+  covariate_features: changes
+  fusion_gate_init: -4.0
+  # Destination-hexagon head (0 = off): rings of 174 m hexagons around the last
+  # fix, trained jointly with the energy score (needs probabilistic=true).
+  hex_rings: 0
+  hex_edge_m: 174.0
+  hex_loss_weight: 0.5
+
+trainer:
+  lr: 3e-4
+  weight_decay: 0.05
+  clip_grad_norm: 1.0
+  amp: true
+  augment_rotation: true

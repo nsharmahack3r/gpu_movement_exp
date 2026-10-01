@@ -1,0 +1,21 @@
+# LSTM arm overrides. Only model-specific keys plus the training knobs that
+# legitimately differ for this arm. NO data/windowing/transforms keys — those
+# come from configs/base.yaml and must be identical across arms.
+model:
+  name: "lstm"
+  hidden_size: 128
+  num_layers: 2
+  dropout: 0.2
+  bidirectional: false
+  decoder: "direct"
+  teacher_forcing_ratio: 1.0
+  scheduled_sampling: "constant"
+  scheduled_sampling_epochs: 50
+  attention: "none"
+
+trainer:
+  # RNNs need far tighter gradient clipping than convnets.
+  clip_grad_norm: 1.0
+  # AMP with cuDNN LSTMs can produce NaNs or degrade quality on some builds;
+  # run an AMP-on/off comparison before enabling. See README.
+  amp: false

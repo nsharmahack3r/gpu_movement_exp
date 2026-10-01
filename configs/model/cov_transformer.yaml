@@ -1,0 +1,75 @@
+# Covariate-aware Transformer (src/movement/models/cov_transformer.py).
+#
+# Unlike the three original arms, this config also sets data/transforms keys,
+# because the arm is defined by *what it sees*:
+#   - data.split_unit=individual  — the corrected, animal-disjoint split
+#     (progress_report.md §7.1). Compare it only against runs on the same split
+#     (reuse this run's split.json via --split-file); never against the legacy
+#     27-run numbers.
+#   - transforms.time_context=true — per-fix solar-hour / year-phase features and
+#     the nominal clock times of the forecast fixes.
+#   - covariates.enabled=true     — per-fix Sentinel-2 values from
+#     GEE_DATASET_PATH/<raw stem>_sentinel2.csv.
+#
+# No-covariate ablation of the same architecture (same split, same everything):
+#   --override covariates.enabled=false --override model.use_covariates=false
+data:
+  split_unit: individual
+
+transforms:
+  time_context: true
+
+covariates:
+  enabled: true
+  path: ${GEE_DATASET_PATH}
+  sources: [sentinel2]
+  file_pattern: "{stem}_{source}.csv"
+  # Every s2_* column: 10 reflectance bands + 6 indices + snow_fraction +
+  # ndvi_rate + n_obs, each with its 30 m buffer twin, plus the composite age.
+  # Forrest et al. (2026) found raw bands beat derived indices, so both are kept
+  # and the variable-selection weights (covariate_selection.csv) show which the
+  # model uses. Narrow with `exclude`, e.g. ["_buf30$"] or ["^s2_B"].
+  include: ["^s2_"]
+  exclude: []
+  date_columns: [s2_composite_date]
+  clip: 8.0
+  min_coverage: 0.5
+  # Hide covariates of fixes < embargo_days before the forecast origin (0 = off).
+  embargo_days: 0
+
+model:
+  name: "cov_transformer"
+  d_model: 128
+  nhead: 8
+  num_encoder_layers: 4
+  num_decoder_layers: 1
+  dim_feedforward: 512
+  dropout: 0.1
+  use_covariates: true
+  var_embed_dim: 16
+  covariate_dropout: 0.1
+  context_dropout: 0.2
+  min_context: 4
+  # Probabilistic head (off = the point-forecast arms of the first studies).
+  # Study arms pcov / pnocov switch it on together with trainer.augment_rotation.
+  probabilistic: false
+  noise_dim: 16
+  n_samples_train: 16
+  n_samples_eval: 64
+  # Covariate fusion / representation (FaunaFormer uses late + changes).
+  covariate_fusion: early
+  covariate_features: levels
+  fusion_gate_init: -4.0
+  # Destination-hexagon head (0 = off): rings of 174 m hexagons around the last
+  # fix, trained jointly with the energy score (needs probabilistic=true).
+  hex_rings: 0
+  hex_edge_m: 174.0
+  hex_loss_weight: 0.5
+
+trainer:
+  # Transformer recipe (as configs/model/transformer.yaml), with stronger weight
+  # decay for the ~3x larger model on small single-species datasets.
+  lr: 3e-4
+  weight_decay: 0.05
+  clip_grad_norm: 1.0
+  amp: true

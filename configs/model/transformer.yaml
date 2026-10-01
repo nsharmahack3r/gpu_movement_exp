@@ -1,0 +1,25 @@
+# Transformer arm overrides. Only model-specific keys plus the training knobs
+# that legitimately differ for this arm. NO data/windowing/transforms keys —
+# those come from configs/base.yaml and must be identical across arms.
+model:
+  name: "transformer"
+  d_model: 128
+  nhead: 8
+  num_layers: 3
+  dim_feedforward: 256
+  dropout: 0.1
+  mode: "encoder_only"
+  pos_encoding: "sinusoidal"
+  pooling: "last"
+  causal_mask: false
+  norm_first: true
+
+trainer:
+  # Transformers need a lower LR than the CNN's 1e-3 and stronger weight decay.
+  lr: 3e-4
+  weight_decay: 0.01
+  # Linear warmup over ~5% of steps into cosine decay (warmup_fraction is
+  # already in base.yaml); clip gradients tighter than the convnet arm.
+  clip_grad_norm: 1.0
+  # AMP works well with attention (unlike the LSTM arm) — leave on.
+  amp: true

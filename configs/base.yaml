@@ -1,0 +1,96 @@
+# Shared defaults for every model arm (CNN, LSTM, Transformer).
+# Loaded first; model configs under configs/model/ override only their own section.
+data:
+  raw_path: ${RAW_DATASET_PATH}
+  processed_path: ${PROCESSED_DATASET_PATH}
+  raw_csv: "*.csv"
+  nominal_dt_hours: 1.0
+  max_gap_multiplier: 3.0
+  # Max plausible step speed (m/s); None = disabled. Steps exceeding this split
+  # the trajectory like a gap (handles GPS glitches / relocation jumps).
+  max_speed_mps: null
+  val_fraction: 0.15
+  test_fraction: 0.15
+  # "segment" = legacy splitter of the 27-run study (leaks animals across splits,
+  # progress_report.md §7.1), kept so those runs reproduce. "individual" = the
+  # animal-disjoint fix; use it for new results. See README "Splits".
+  split_unit: "segment"
+  # split_unit=individual_kfold only: number of fix-balanced animal folds and
+  # which one is the test fold (validation is fold + 1 mod n_folds).
+  n_folds: 5
+  fold: 0
+  # split_unit=individual_kfold_tailval only: share of each training animal's
+  # fixes (the most recent ones) held out as validation.
+  val_tail_fraction: 0.15
+
+windowing:
+  input_len: 24
+  horizon: 12
+  stride: 1
+  eval_stride: 12
+
+transforms:
+  projection: "local_enu"
+  delta_encoding: true
+  step_length: false
+  turning_angle: false
+  speed: false
+  delta_t: false
+  cyclical_time: false
+  scale: true
+  # Per-fix solar-time / nominal-future-time context passed to the model via
+  # `context` (read by cov_transformer; ignored by the other arms).
+  time_context: false
+  # Memory features (src/movement/data/memory.py): the animal's own position at
+  # the same clock time on the previous `memory_days` days, and a home-range
+  # summary of the last `memory_lookback_days`. Read by cov_transformer only.
+  memory: false
+  memory_days: 7
+  memory_lookback_days: 14.0
+  memory_near_m: 200.0
+
+# Per-fix covariates from GEE_DATASET_PATH (cov_transformer). Off for every arm by
+# default; configs/model/cov_transformer.yaml turns it on and sets `path`.
+covariates:
+  enabled: false
+  path: null
+
+model:
+  name: "tcn"
+  channels: [64, 64, 64, 64]
+  kernel_size: 3
+  dropout: 0.2
+  activation: "gelu"
+  norm: "layernorm"
+  head: "direct"
+
+trainer:
+  seed: 42
+  deterministic: false
+  batch_size: 256
+  eval_batch_size: 512
+  gradient_accumulation_steps: 1
+  max_epochs: 100
+  lr: 1e-3
+  weight_decay: 1e-4
+  warmup_fraction: 0.05
+  clip_grad_norm: 10.0
+  amp: true
+  early_stopping_patience: 15
+  # Rotate/mirror training windows (off by default; see TrainerConfig).
+  augment_rotation: false
+  run_dir: "runs"
+  checkpoint_dir: "checkpoints"
+  tensorboard_dir: "tensorboard"
+  log_level: "INFO"
+
+evaluation:
+  per_horizon: true
+  n_plots: 4
+  plot_seed: 0
+
+tracking:
+  backend: "tensorboard"
+  project: "movement-forecasting"
+  entity: null
+  offline: true

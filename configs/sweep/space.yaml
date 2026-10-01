@@ -1,0 +1,181 @@
+# Hyperparameter-validation study: search spaces and capacity axes.
+#
+# This file is the single source of truth for the sweep. scripts/sweep.py reads
+# it; nothing about the search space is hardcoded in Python. It is versioned so
+# every trial's resolved config is traceable to the exact space that produced it.
+#
+# Two kinds of axes:
+#
+# - `shared`: identical distributions for every arm — the fairness argument of
+#   the study. Every arm samples from exactly the same hyperparameter space.
+# - `capacity`: arm-specific axes, deliberately equal cardinality (4 options
+#   each) so the search budget is symmetric. Each option is a fragment of that
+#   arm's OWN model config schema (no isinstance anywhere: the sweep applies the
+#   fragment to the arm's config and lets pydantic validate it).
+#
+# Trial identity: each trial's resolved config is hashed (SHA-256 over the
+# canonical JSON) into `config_hash`; a trial is considered complete iff its
+# hash is recorded with status=complete in trials.csv. Re-running the same
+# resolved config (e.g. two random draws hitting the same point) is deduplicated
+# by that hash — the budget counts unique configs, not draws.
+
+study_name: "hyperparameter_validation"
+
+# Datasets used by the sweep. `window` mirrors the windowing that produced the
+# existing 27 runs (runs/<dataset>/split.json + scalers.json are reused as-is —
+# never re-split, never re-fit).
+datasets:
+  wolf_reshaped:
+    raw_csv: "wolf_reshaped.csv"
+    nominal_dt_hours: 1.0
+    max_gap_multiplier: 3.0
+    max_speed_mps: null
+    input_len: 24
+    horizon: 12
+    stride: 1
+    eval_stride: 12
+  boar_reshaped:
+    raw_csv: "boar_reshaped.csv"
+    nominal_dt_hours: 1.0
+    max_gap_multiplier: 3.0
+    max_speed_mps: null
+    input_len: 24
+    horizon: 12
+    stride: 1
+    eval_stride: 12
+  cougars_reshaped:
+    raw_csv: "cougars_reshaped.csv"
+    nominal_dt_hours: 2.0
+    max_gap_multiplier: 3.0
+    max_speed_mps: null
+    input_len: 12
+    horizon: 6
+    stride: 1
+    eval_stride: 6
+
+# Not part of the default sweep (per spec §2): wild_pig is a longer-horizon
+# optional add-on; african_elephant's timestamps are under review; mule_deer /
+# white_tail_deer are too expensive.
+
+# --- Arm A: learning-rate sensitivity ---
+# One-dimensional sweep over lr at current defaults. `lr_values` is a plain
+# list (log-spaced, 3e-5 .. 3e-3) matching spec §3 Arm A.
+sensitivity:
+  # Numeric YAML literals — 3e-5 must be written as 0.00003 (YAML 1.1 would
+  # parse the bare "3e-5" as a string, which breaks pydantic and the plan table).
+  lr_values: [0.00003, 0.0001, 0.0003, 0.001, 0.003]
+
+# --- Arm B: equal-budget random search ---
+# Shared axes: identical sampling for every arm.
+# Each axis declares the config key it maps to. All keys must exist in EVERY
+# arm's schema — lr/weight_decay/clip_grad_norm/warmup_fraction are in the
+# shared TrainerConfig; dropout is model.dropout in all three arms.
+# (Values are numeric YAML literals; bare `1e-4` would parse as a string.)
+shared:
+  lr:
+    key: "trainer.lr"
+    kind: log_uniform
+    min: 0.0001
+    max: 0.003
+  weight_decay:
+    key: "trainer.weight_decay"
+    kind: log_uniform
+    min: 0.00001
+    max: 0.1
+  dropout:
+    key: "model.dropout"
+    kind: choice
+    options: [0.0, 0.1, 0.2, 0.3]
+  clip_grad_norm:
+    key: "trainer.clip_grad_norm"
+    kind: choice
+    options: [0.5, 1.0, 5.0, 10.0]
+  warmup_fraction:
+    key: "trainer.warmup_fraction"
+    kind: choice
+    options: [0.0, 0.05, 0.10]
+
+# Arm-specific capacity axes. Each maps an arm name to its config keys.
+# The LSTM's own schema keeps `dropout` in model.* while the shared axes live
+# in trainer.* — the study's shared space must apply uniformly to every arm,
+# so the LSTM's model-level dropout is NOT part of the shared space. (The
+# dropout axis below is the TCN/Transformer model-level dropout; the LSTM's
+# model.dropout stays fixed at its default, exactly like the existing study.)
+capacity:
+  tcn:
+    # channel width per residual block (all blocks share one width). The block
+    # count remains receptive-field-driven (spec §7: not free to search).
+    # value is a list with one element per key: the single key `model.channels`
+    # gets a whole list as its value.
+    keys: ["model.channels"]
+    options:
+      - value: [[32, 32, 32, 32]]
+        label: "c32"
+      - value: [[48, 48, 48, 48]]
+        label: "c48"
+      - value: [[64, 64, 64, 64]]
+        label: "c64"
+      - value: [[96, 96, 96, 96]]
+        label: "c96"
+  lstm:
+    # hidden size; num_layers stays 2 (default). model.dropout is fixed (see
+    # note above) so the shared dropout axis is the only dropout knob.
+    # Values are single-element lists to zip uniformly with `keys`.
+    keys: ["model.hidden_size"]
+    options:
+      - value: [64]
+        label: "h64"
+      - value: [96]
+        label: "h96"
+      - value: [128]
+        label: "h128"
+      - value: [192]
+        label: "h192"
+  transformer:
+    # d_model, with dim_feedforward = 2*d_model and nhead = d_model/16 derived
+    # (spec §3: "dim_feedforward = 2·d_model, nhead = d_model/16").
+    keys: ["model.d_model", "model.dim_feedforward", "model.nhead"]
+    options:
+      - value: [64, 128, 4]
+        label: "d64"
+      - value: [96, 192, 6]
+        label: "d96"
+      - value: [128, 256, 8]
+        label: "d128"
+      - value: [192, 384, 12]
+        label: "d192"
+
+# --- Arm C: capacity-matched control ---
+# Target: TCN parameter count on the same dataset/window, within +/-10%.
+# The per-dataset TCN counts (verified by instantiating on CPU):
+#   wolf/boar (24->12): 102,104   cougars (12->6): 101,324
+# The tooling (scripts/sweep.py capacity-match) counts real models to solve for
+# the config; these are starting points only, verified at build time.
+capacity_match:
+  tolerance: 0.10
+  tcn_reference: "default"   # 'default' = the arm's default config on each dataset
+  lstm:
+    # d_model analogue: hidden_size, num_layers, dropout fixed.
+    hidden_size: 80
+    num_layers: 2
+    dropout: 0.2
+  transformer:
+    d_model: 64
+    num_layers: 3
+    dim_feedforward: 128
+    dropout: 0.1
+
+# --- Arm D: multi-seed confirmation ---
+# Seeds per handoff.md §4 commitment.
+seeds: [42, 7, 123]
+
+# --- Budgets / selection ---
+# Selection metric for every arm: validation ADE (test split is off limits
+# during search — enforced in code, see sweep.py).
+selection_metric: "val_ade"
+search_trials_per_arm_dataset: 20
+
+# --- VRAM ceiling ---
+# RTX 4060 8 GB; a trial whose estimated peak exceeds this is skipped and
+# recorded with failure_reason="estimated_vram_oom" before it ever starts.
+vram_ceiling_mb: 8000
